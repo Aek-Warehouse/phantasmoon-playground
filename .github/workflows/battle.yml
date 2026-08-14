@@ -1,15 +1,15 @@
-name: Phantasmoon battle
+name: Phantasmoon Battle
 
 on:
   workflow_dispatch:
     inputs:
       seed:
-        description: "Deterministic match seed"
+        description: "Match seed"
         required: true
         default: "424242"
         type: string
       cycles:
-        description: "Match cycles (1 to 8000000)"
+        description: "Cycles"
         required: true
         default: "8000000"
         type: string
@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   battle:
-    name: Validate and simulate both player sides
+    name: Run battle
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -29,56 +29,57 @@ jobs:
       EXPECTED_EVALUATOR_SHA256: 2B2DA7E8CBBA1C9D16D6626C5BAB7560ED4AD298689A016A4F5E1A38CB28EAF4
 
     steps:
-      - name: Check out the playground
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Check files and numeric inputs
+      - name: Check inputs
         shell: bash
         run: |
           set -euo pipefail
 
           test -f Dockerfile.dev
           test -f phantasmoon-gui
-          test -f play/your_bot.s
+          test -f play/aek-warehouse_bot.s
           test -f play/challenger.s
-          test ! -L play/your_bot.s
+
+          test ! -L play/aek-warehouse_bot.s
           test ! -L play/challenger.s
 
           case "$BATTLE_SEED" in
             ''|*[!0-9]*)
-              echo "Seed must contain digits only" >&2
+              echo "Seed must contain digits only."
               exit 1
               ;;
           esac
 
           case "$BATTLE_CYCLES" in
             ''|*[!0-9]*)
-              echo "Cycles must contain digits only" >&2
+              echo "Cycles must contain digits only."
               exit 1
               ;;
           esac
 
           if (( BATTLE_SEED > 2147483647 )); then
-            echo "Seed is too large" >&2
+            echo "Seed is too large."
             exit 1
           fi
 
           if (( BATTLE_CYCLES < 1 || BATTLE_CYCLES > 8000000 )); then
-            echo "Cycles must be between 1 and 8000000" >&2
+            echo "Cycles must be between 1 and 8000000."
             exit 1
           fi
 
-          if (( $(wc -c < play/your_bot.s) > 262144 )); then
-            echo "your_bot.s exceeds the 256 KiB submission limit" >&2
+          if (( $(wc -c < play/aek-warehouse_bot.s) > 262144 )); then
+            echo "aek-warehouse_bot.s exceeds 256 KiB."
             exit 1
           fi
 
           if (( $(wc -c < play/challenger.s) > 262144 )); then
-            echo "challenger.s exceeds the 256 KiB submission limit" >&2
+            echo "challenger.s exceeds 256 KiB."
             exit 1
           fi
 
-      - name: Verify evaluator hash
+      - name: Verify evaluator
         shell: bash
         run: |
           set -euo pipefail
@@ -86,20 +87,20 @@ jobs:
           actual="$(sha256sum phantasmoon-gui | awk '{print toupper($1)}')"
           expected="$(printf '%s' "$EXPECTED_EVALUATOR_SHA256" | tr '[:lower:]' '[:upper:]')"
 
-          echo "Evaluator SHA-256: $actual"
           test "$actual" = "$expected"
+          echo "Evaluator verified."
 
-      - name: Build evaluator image
+      - name: Build evaluator
         run: docker build --file Dockerfile.dev --tag phantasmoon-dev .
 
-      - name: Validate your bot
+      - name: Validate AEK-Warehouse bot
         run: >-
           docker run --rm -e QT_QPA_PLATFORM=offscreen
           -v "${{ github.workspace }}:/workspace"
           phantasmoon-dev phantasmoon-gui
-          --check /workspace/play/your_bot.s
+          --check /workspace/play/aek-warehouse_bot.s
 
-      - name: Validate challenger bot
+      - name: Validate challenger
         run: >-
           docker run --rm -e QT_QPA_PLATFORM=offscreen
           -v "${{ github.workspace }}:/workspace"
@@ -112,189 +113,110 @@ jobs:
           {
             echo "seed=$BATTLE_SEED"
             echo "cycles=$BATTLE_CYCLES"
-            echo
-            echo "SHA-256 hashes:"
-            sha256sum phantasmoon-gui play/your_bot.s play/challenger.s
-          } | tee battle-provenance.txt
+            sha256sum \
+              phantasmoon-gui \
+              play/aek-warehouse_bot.s \
+              play/challenger.s
+          } > battle-provenance.txt
 
-      - name: Run both player assignments
+      - name: Run battle
         shell: bash
         run: |
           set -euo pipefail
 
           : > battle-results.txt
+          : > battle-raw.txt
 
-          print_line() {
+          log() {
             printf '%s\n' "$1" | tee -a battle-results.txt
           }
 
-          print_named_winner() {
-            local result_file="$1"
-            local player0_name="$2"
-            local player1_name="$3"
-
-            local winner_line
-            winner_line="$(grep '^winner:' "$result_file" | tail -n 1 || true)"
-
-            print_line ""
-
-            case "$winner_line" in
-              "winner: player 0")
-                print_line "NAMED WINNER: $player0_name"
-                ;;
-              "winner: player 1")
-                print_line "NAMED WINNER: $player1_name"
-                ;;
-              "")
-                print_line "NAMED WINNER: Could not determine winner from evaluator output"
-                ;;
-              *)
-                print_line "NAMED RESULT: $winner_line"
-                ;;
-            esac
+          field() {
+            local line="$1"
+            local key="$2"
+            printf '%s\n' "$line" | sed -nE "s/.*${key}=([^ ]+).*/\1/p"
           }
 
-          ######################################################################
-          # Battle information
-          ######################################################################
+          run_match() {
+            local number="$1"
+            local player0_name="$2"
+            local player0_path="$3"
+            local player1_name="$4"
+            local player1_path="$5"
 
-          print_line "============================================================"
-          print_line "PHANTASMOON BATTLE"
-          print_line "============================================================"
-          print_line ""
-          print_line "Seed:   $BATTLE_SEED"
-          print_line "Cycles: $BATTLE_CYCLES"
-          print_line ""
-          print_line "Two matches are run with the player positions reversed."
-          print_line ""
-          print_line "IMPORTANT:"
-          print_line "  Player 0 and Player 1 are MATCH POSITIONS, not bot names."
-          print_line ""
-          print_line "  MATCH 1:"
-          print_line "    Player 0 = YOUR BOT"
-          print_line "    Player 1 = CHALLENGER"
-          print_line ""
-          print_line "  MATCH 2:"
-          print_line "    Player 0 = CHALLENGER"
-          print_line "    Player 1 = YOUR BOT"
-          print_line ""
+            local raw
+            raw="$(
+              docker run --rm -e QT_QPA_PLATFORM=offscreen \
+                -v "${GITHUB_WORKSPACE}:/workspace" \
+                phantasmoon-dev phantasmoon-gui --headless \
+                --seed "$BATTLE_SEED" \
+                --cycles "$BATTLE_CYCLES" \
+                --bot0 "$player0_path" \
+                --bot1 "$player1_path"
+            )"
 
-          ######################################################################
-          # Match 1
-          ######################################################################
+            {
+              echo "===== MATCH $number RAW ====="
+              echo "$raw"
+              echo
+            } >> battle-raw.txt
 
-          print_line "============================================================"
-          print_line "MATCH 1 - YOUR BOT AS PLAYER 0"
-          print_line "============================================================"
-          print_line ""
-          print_line "Player 0: YOUR BOT"
-          print_line "          play/your_bot.s"
-          print_line ""
-          print_line "Player 1: CHALLENGER"
-          print_line "          play/challenger.s"
-          print_line ""
-          print_line "Seed:   $BATTLE_SEED"
-          print_line "Cycles: $BATTLE_CYCLES"
-          print_line ""
-          print_line "-------------------- EVALUATOR OUTPUT ----------------------"
+            local p0
+            local p1
+            local winner
 
-          docker run --rm -e QT_QPA_PLATFORM=offscreen \
-            -v "${GITHUB_WORKSPACE}:/workspace" \
-            phantasmoon-dev phantasmoon-gui --headless \
-            --seed "$BATTLE_SEED" \
-            --cycles "$BATTLE_CYCLES" \
-            --bot0 /workspace/play/your_bot.s \
-            --bot1 /workspace/play/challenger.s \
-            | tee match1-raw.txt \
-            | tee -a battle-results.txt
+            p0="$(printf '%s\n' "$raw" | grep '^player 0:' | tail -n 1)"
+            p1="$(printf '%s\n' "$raw" | grep '^player 1:' | tail -n 1)"
+            winner="$(printf '%s\n' "$raw" | grep '^winner:' | tail -n 1)"
 
-          print_line "------------------------------------------------------------"
+            local winner_name="Unknown"
 
-          print_named_winner \
-            "match1-raw.txt" \
-            "YOUR BOT" \
-            "CHALLENGER"
+            case "$winner" in
+              "winner: player 0")
+                winner_name="$player0_name"
+                ;;
+              "winner: player 1")
+                winner_name="$player1_name"
+                ;;
+            esac
 
-          print_line ""
-          print_line "Match 1 mapping:"
-          print_line "  player 0 = YOUR BOT"
-          print_line "  player 1 = CHALLENGER"
-          print_line ""
+            log "MATCH $number"
+            log "$player0_name [P0]  score=$(field "$p0" score) | puzzles=$(field "$p0" puzzles_completed) | weight=$(field "$p0" carried_weight) | faulted=$(field "$p0" faulted)"
+            log "$player1_name [P1]  score=$(field "$p1" score) | puzzles=$(field "$p1" puzzles_completed) | weight=$(field "$p1" carried_weight) | faulted=$(field "$p1" faulted)"
+            log "Winner: $winner_name"
+            log ""
+          }
 
-          ######################################################################
-          # Match 2
-          ######################################################################
+          log "============================================"
+          log "PHANTASMOON BATTLE"
+          log "Seed: $BATTLE_SEED | Cycles: $BATTLE_CYCLES"
+          log "============================================"
+          log ""
 
-          print_line "============================================================"
-          print_line "MATCH 2 - SIDES SWAPPED"
-          print_line "============================================================"
-          print_line ""
-          print_line "Player 0: CHALLENGER"
-          print_line "          play/challenger.s"
-          print_line ""
-          print_line "Player 1: YOUR BOT"
-          print_line "          play/your_bot.s"
-          print_line ""
-          print_line "Seed:   $BATTLE_SEED"
-          print_line "Cycles: $BATTLE_CYCLES"
-          print_line ""
-          print_line "-------------------- EVALUATOR OUTPUT ----------------------"
+          run_match \
+            "1" \
+            "AEK-Warehouse" \
+            "/workspace/play/aek-warehouse_bot.s" \
+            "Challenger" \
+            "/workspace/play/challenger.s"
 
-          docker run --rm -e QT_QPA_PLATFORM=offscreen \
-            -v "${GITHUB_WORKSPACE}:/workspace" \
-            phantasmoon-dev phantasmoon-gui --headless \
-            --seed "$BATTLE_SEED" \
-            --cycles "$BATTLE_CYCLES" \
-            --bot0 /workspace/play/challenger.s \
-            --bot1 /workspace/play/your_bot.s \
-            | tee match2-raw.txt \
-            | tee -a battle-results.txt
+          run_match \
+            "2" \
+            "Challenger" \
+            "/workspace/play/challenger.s" \
+            "AEK-Warehouse" \
+            "/workspace/play/aek-warehouse_bot.s"
 
-          print_line "------------------------------------------------------------"
+          log "============================================"
+          log "BATTLE COMPLETE"
+          log "============================================"
 
-          print_named_winner \
-            "match2-raw.txt" \
-            "CHALLENGER" \
-            "YOUR BOT"
-
-          print_line ""
-          print_line "Match 2 mapping:"
-          print_line "  player 0 = CHALLENGER"
-          print_line "  player 1 = YOUR BOT"
-          print_line ""
-
-          ######################################################################
-          # Final explanation
-          ######################################################################
-
-          print_line "============================================================"
-          print_line "BATTLE COMPLETE"
-          print_line "============================================================"
-          print_line ""
-          print_line "Both player assignments were tested."
-          print_line ""
-          print_line "Remember:"
-          print_line "  Player numbers describe positions in the simulator."
-          print_line "  They do not permanently identify either bot."
-          print_line ""
-          print_line "Match 1:"
-          print_line "  Player 0 = YOUR BOT"
-          print_line "  Player 1 = CHALLENGER"
-          print_line ""
-          print_line "Match 2:"
-          print_line "  Player 0 = CHALLENGER"
-          print_line "  Player 1 = YOUR BOT"
-          print_line ""
-          print_line "Use both matches when comparing the bots because player"
-          print_line "assignment can affect the simulation outcome."
-
-          rm -f match1-raw.txt match2-raw.txt
-
-      - name: Upload match results
+      - name: Upload results
         uses: actions/upload-artifact@v4
         with:
           name: phantasmoon-battle-results
           path: |
             battle-results.txt
+            battle-raw.txt
             battle-provenance.txt
           retention-days: 14
