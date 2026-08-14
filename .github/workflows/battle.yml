@@ -1,0 +1,300 @@
+name: Phantasmoon battle
+
+on:
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: "Deterministic match seed"
+        required: true
+        default: "424242"
+        type: string
+      cycles:
+        description: "Match cycles (1 to 8000000)"
+        required: true
+        default: "8000000"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  battle:
+    name: Validate and simulate both player sides
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      BATTLE_SEED: ${{ inputs.seed }}
+      BATTLE_CYCLES: ${{ inputs.cycles }}
+      EXPECTED_EVALUATOR_SHA256: 2B2DA7E8CBBA1C9D16D6626C5BAB7560ED4AD298689A016A4F5E1A38CB28EAF4
+
+    steps:
+      - name: Check out the playground
+        uses: actions/checkout@v4
+
+      - name: Check files and numeric inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f Dockerfile.dev
+          test -f phantasmoon-gui
+          test -f play/your_bot.s
+          test -f play/challenger.s
+          test ! -L play/your_bot.s
+          test ! -L play/challenger.s
+
+          case "$BATTLE_SEED" in
+            ''|*[!0-9]*)
+              echo "Seed must contain digits only" >&2
+              exit 1
+              ;;
+          esac
+
+          case "$BATTLE_CYCLES" in
+            ''|*[!0-9]*)
+              echo "Cycles must contain digits only" >&2
+              exit 1
+              ;;
+          esac
+
+          if (( BATTLE_SEED > 2147483647 )); then
+            echo "Seed is too large" >&2
+            exit 1
+          fi
+
+          if (( BATTLE_CYCLES < 1 || BATTLE_CYCLES > 8000000 )); then
+            echo "Cycles must be between 1 and 8000000" >&2
+            exit 1
+          fi
+
+          if (( $(wc -c < play/your_bot.s) > 262144 )); then
+            echo "your_bot.s exceeds the 256 KiB submission limit" >&2
+            exit 1
+          fi
+
+          if (( $(wc -c < play/challenger.s) > 262144 )); then
+            echo "challenger.s exceeds the 256 KiB submission limit" >&2
+            exit 1
+          fi
+
+      - name: Verify evaluator hash
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          actual="$(sha256sum phantasmoon-gui | awk '{print toupper($1)}')"
+          expected="$(printf '%s' "$EXPECTED_EVALUATOR_SHA256" | tr '[:lower:]' '[:upper:]')"
+
+          echo "Evaluator SHA-256: $actual"
+          test "$actual" = "$expected"
+
+      - name: Build evaluator image
+        run: docker build --file Dockerfile.dev --tag phantasmoon-dev .
+
+      - name: Validate your bot
+        run: >-
+          docker run --rm -e QT_QPA_PLATFORM=offscreen
+          -v "${{ github.workspace }}:/workspace"
+          phantasmoon-dev phantasmoon-gui
+          --check /workspace/play/your_bot.s
+
+      - name: Validate challenger bot
+        run: >-
+          docker run --rm -e QT_QPA_PLATFORM=offscreen
+          -v "${{ github.workspace }}:/workspace"
+          phantasmoon-dev phantasmoon-gui
+          --check /workspace/play/challenger.s
+
+      - name: Record provenance
+        shell: bash
+        run: |
+          {
+            echo "seed=$BATTLE_SEED"
+            echo "cycles=$BATTLE_CYCLES"
+            echo
+            echo "SHA-256 hashes:"
+            sha256sum phantasmoon-gui play/your_bot.s play/challenger.s
+          } | tee battle-provenance.txt
+
+      - name: Run both player assignments
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          : > battle-results.txt
+
+          print_line() {
+            printf '%s\n' "$1" | tee -a battle-results.txt
+          }
+
+          print_named_winner() {
+            local result_file="$1"
+            local player0_name="$2"
+            local player1_name="$3"
+
+            local winner_line
+            winner_line="$(grep '^winner:' "$result_file" | tail -n 1 || true)"
+
+            print_line ""
+
+            case "$winner_line" in
+              "winner: player 0")
+                print_line "NAMED WINNER: $player0_name"
+                ;;
+              "winner: player 1")
+                print_line "NAMED WINNER: $player1_name"
+                ;;
+              "")
+                print_line "NAMED WINNER: Could not determine winner from evaluator output"
+                ;;
+              *)
+                print_line "NAMED RESULT: $winner_line"
+                ;;
+            esac
+          }
+
+          ######################################################################
+          # Battle information
+          ######################################################################
+
+          print_line "============================================================"
+          print_line "PHANTASMOON BATTLE"
+          print_line "============================================================"
+          print_line ""
+          print_line "Seed:   $BATTLE_SEED"
+          print_line "Cycles: $BATTLE_CYCLES"
+          print_line ""
+          print_line "Two matches are run with the player positions reversed."
+          print_line ""
+          print_line "IMPORTANT:"
+          print_line "  Player 0 and Player 1 are MATCH POSITIONS, not bot names."
+          print_line ""
+          print_line "  MATCH 1:"
+          print_line "    Player 0 = YOUR BOT"
+          print_line "    Player 1 = CHALLENGER"
+          print_line ""
+          print_line "  MATCH 2:"
+          print_line "    Player 0 = CHALLENGER"
+          print_line "    Player 1 = YOUR BOT"
+          print_line ""
+
+          ######################################################################
+          # Match 1
+          ######################################################################
+
+          print_line "============================================================"
+          print_line "MATCH 1 - YOUR BOT AS PLAYER 0"
+          print_line "============================================================"
+          print_line ""
+          print_line "Player 0: YOUR BOT"
+          print_line "          play/your_bot.s"
+          print_line ""
+          print_line "Player 1: CHALLENGER"
+          print_line "          play/challenger.s"
+          print_line ""
+          print_line "Seed:   $BATTLE_SEED"
+          print_line "Cycles: $BATTLE_CYCLES"
+          print_line ""
+          print_line "-------------------- EVALUATOR OUTPUT ----------------------"
+
+          docker run --rm -e QT_QPA_PLATFORM=offscreen \
+            -v "${GITHUB_WORKSPACE}:/workspace" \
+            phantasmoon-dev phantasmoon-gui --headless \
+            --seed "$BATTLE_SEED" \
+            --cycles "$BATTLE_CYCLES" \
+            --bot0 /workspace/play/your_bot.s \
+            --bot1 /workspace/play/challenger.s \
+            | tee match1-raw.txt \
+            | tee -a battle-results.txt
+
+          print_line "------------------------------------------------------------"
+
+          print_named_winner \
+            "match1-raw.txt" \
+            "YOUR BOT" \
+            "CHALLENGER"
+
+          print_line ""
+          print_line "Match 1 mapping:"
+          print_line "  player 0 = YOUR BOT"
+          print_line "  player 1 = CHALLENGER"
+          print_line ""
+
+          ######################################################################
+          # Match 2
+          ######################################################################
+
+          print_line "============================================================"
+          print_line "MATCH 2 - SIDES SWAPPED"
+          print_line "============================================================"
+          print_line ""
+          print_line "Player 0: CHALLENGER"
+          print_line "          play/challenger.s"
+          print_line ""
+          print_line "Player 1: YOUR BOT"
+          print_line "          play/your_bot.s"
+          print_line ""
+          print_line "Seed:   $BATTLE_SEED"
+          print_line "Cycles: $BATTLE_CYCLES"
+          print_line ""
+          print_line "-------------------- EVALUATOR OUTPUT ----------------------"
+
+          docker run --rm -e QT_QPA_PLATFORM=offscreen \
+            -v "${GITHUB_WORKSPACE}:/workspace" \
+            phantasmoon-dev phantasmoon-gui --headless \
+            --seed "$BATTLE_SEED" \
+            --cycles "$BATTLE_CYCLES" \
+            --bot0 /workspace/play/challenger.s \
+            --bot1 /workspace/play/your_bot.s \
+            | tee match2-raw.txt \
+            | tee -a battle-results.txt
+
+          print_line "------------------------------------------------------------"
+
+          print_named_winner \
+            "match2-raw.txt" \
+            "CHALLENGER" \
+            "YOUR BOT"
+
+          print_line ""
+          print_line "Match 2 mapping:"
+          print_line "  player 0 = CHALLENGER"
+          print_line "  player 1 = YOUR BOT"
+          print_line ""
+
+          ######################################################################
+          # Final explanation
+          ######################################################################
+
+          print_line "============================================================"
+          print_line "BATTLE COMPLETE"
+          print_line "============================================================"
+          print_line ""
+          print_line "Both player assignments were tested."
+          print_line ""
+          print_line "Remember:"
+          print_line "  Player numbers describe positions in the simulator."
+          print_line "  They do not permanently identify either bot."
+          print_line ""
+          print_line "Match 1:"
+          print_line "  Player 0 = YOUR BOT"
+          print_line "  Player 1 = CHALLENGER"
+          print_line ""
+          print_line "Match 2:"
+          print_line "  Player 0 = CHALLENGER"
+          print_line "  Player 1 = YOUR BOT"
+          print_line ""
+          print_line "Use both matches when comparing the bots because player"
+          print_line "assignment can affect the simulation outcome."
+
+          rm -f match1-raw.txt match2-raw.txt
+
+      - name: Upload match results
+        uses: actions/upload-artifact@v4
+        with:
+          name: phantasmoon-battle-results
+          path: |
+            battle-results.txt
+            battle-provenance.txt
+          retention-days: 14
